@@ -8,12 +8,15 @@ use Bernard\EventListener\FailureSubscriber;
 use Bernard\Normalizer\EnvelopeNormalizer;
 use Bernard\Producer;
 use Bernard\QueueFactory\PersistentFactory;
-use Bernard\Serializer;
 use Bernard\Router\SimpleRouter;
+use Bernard\Serializer;
+use Normalt\Normalizer\AggregateNormalizer;
 use Pimple\ServiceProviderInterface;
 use Pimple\Container;
 use Symfony\Component\EventDispatcher\EventDispatcher;
-use Normalt\Normalizer\AggregateNormalizer;
+use InvalidArgumentException;
+use SlimQueue\Interfaces\JobInterface;
+use SlimQueue\Interfaces\JobFailInterface;
 
 class ServiceProvider implements ServiceProviderInterface
 {
@@ -60,7 +63,21 @@ class ServiceProvider implements ServiceProviderInterface
         return new SimpleRouter([
             $name => function (SlimMessage $message) use ($container) {
                 $class = $message->getClass();
-                (new $class)($container, $message->all());
+                $instance = new $class($container, $message->all());
+
+                if (!$instance instanceof JobInterface) {
+                    throw new InvalidArgumentException();
+                }
+
+                try {
+                    $instance->handle();
+                } catch (Exception $e) {
+                    if ($instance instanceof JobFailInterface) {
+                        $instance->fail($e);
+                    }
+
+                    throw $e;
+                }
             }
         ]);
     }
@@ -76,10 +93,10 @@ class ServiceProvider implements ServiceProviderInterface
 
     /**
      * 
-     * @param type $container
+     * @param \Interop\Container\ContainerInterface $container
      * @return \Bernard\Driver
      */
-    public function crateDriver($container)
+    public function createDriver($container)
     {
         $config = $container['settings']['queue'];
         switch ($config['driver']) {
@@ -111,7 +128,10 @@ class ServiceProvider implements ServiceProviderInterface
                 return $this->createPheanstalkDriver($config['options'], $container);
 
             case 'interop':
-                return $this->createPheanstalkDriver($config['options'], $container);
+                return $this->createInteropDriver($config['options'], $container);
+
+            case 'ironmq':
+                return $this->createIronMQDriver($config['options'], $container[$config['options']['connection']]);
         }
     }
 
@@ -176,7 +196,8 @@ class ServiceProvider implements ServiceProviderInterface
     public function createPhpRedisDriver(array $config)
     {
         $redis = new \Redis();
-        $redis->connect($config['host'], $config['port']);
+        $port = isset($config['port']) ? $config['port'] : null; 
+        $redis->connect($config['host'], $port);
         $redis->setOption(\Redis::OPT_PREFIX, 'bernard:');
 
         return new \Bernard\Driver\PhpRedisDriver($redis);
@@ -189,7 +210,7 @@ class ServiceProvider implements ServiceProviderInterface
      */
     public function createPredisDriver(array $config)
     {
-        $predis = \Predis\Client($config['host'], ['prefix' => 'bernard:']);
+        $predis = new \Predis\Client($config['host'], ['prefix' => 'bernard:']);
 
         return new \Bernard\Driver\PredisDriver($predis);
     }
